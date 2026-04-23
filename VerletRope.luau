@@ -1,96 +1,45 @@
 --[[
-    VerletRope.luau
-    ═══════════════════════════════════════════════════════════════════════════
-    A fully server-side rope and chain simulation engine built on Verlet
-    Integration — a numerical integration method popular in cloth and rope
-    physics since the Jakobsen (2001) GDC paper, but rarely seen implemented
-    from scratch in Roblox Luau.
-
-    ── What makes this unique ───────────────────────────────────────────────
-    Most Roblox "ropes" are either RopeConstraints (black-box engine feature)
-    or cosmetic bezier curves with no real physics.  This system:
-
-        • Simulates every link as a mass-less point ("particle") in 3-D space.
-        • Enforces rigid-link distance constraints via iterative relaxation —
-          the same core algorithm used in AAA cloth engines.
-        • Supports pinning any subset of particles to anchors (e.g. both ends,
-          one end, a moving NPC hand).
-        • Detects per-particle collisions with workspace geometry each frame
-          using SphereCast, so ropes drape over surfaces realistically.
-        • Wraps everything in a clean OOP API backed by metatables.
-        • Pools the visual cylinder Parts so firing/destroying ropes is cheap.
-        • Exposes a Wind vector so ropes sway in a simulated breeze.
-        • Ropes can be "cut" at any link index, splitting into two independent
-          simulations — a feature with zero equivalent in RopeConstraint.
-
-    ── Physics primer (Verlet Integration) ─────────────────────────────────
-    Standard Euler:   pos += vel * dt
-    Verlet:           newPos = pos + (pos - prevPos) + accel * dt²
-
-    The trick: velocity is implicit — it emerges from (pos - prevPos).
-    This means:
-        • No explicit velocity storage per particle (saves memory).
-        • Constraints can teleport particles without corrupting velocity in
-          a way that causes explosions (Euler's worst failure mode).
-        • Energy is near-perfectly conserved over many frames.
-
-    After integrating, we run SOLVER_ITERATIONS passes of constraint
-    relaxation.  Each pass pushes every pair of adjacent particles back to
-    their rest length.  More iterations = stiffer rope, fewer = rubbery.
-
-	** You guys asked for detailed comments btw, feels like submitting an assignment ngl
+VertelRope.luau:
+A fully server-side rope and chain simulation engine built on Verlet Integration.
 --]]
 
--- ═══════════════════════════════════════════════════════════════════════════
--- 1. SERVICES & CONSTANTS
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- VARIABLES
+-- =================================================================
 
 local RunService = game:GetService("RunService")
 local Debris     = game:GetService("Debris")
 
--- Gravity vector pulled from workspace so it respects place-level overrides.
+-- Gravity Vector3
 local GRAVITY = Vector3.new(0, -workspace.Gravity, 0)
 
--- Number of constraint-relaxation passes per physics step.
--- 6 gives a stiff, believable rope without heavy CPU cost.
+-- # of constraint-relaxation passes per physics step.
 local SOLVER_ITERATIONS = 6
 
--- Radius used for per-particle SphereCast collision queries (studs).
--- Matches the visual cylinder radius so the rope "sits" on surfaces.
+-- Radius used for per-particle SphereCast collision queries in studs.
 local PARTICLE_RADIUS = 0.07
 
 -- Damping factor applied to implicit velocity each frame (0-1).
--- 0.985 ≈ slight energy loss, prevents endless oscillation.
 local DAMPING = 0.985
 
--- dt cap — prevents the solver from exploding during a lag spike.
 local MAX_DT = 1 / 30
 
--- Wind acceleration added to every free (non-pinned) particle each frame.
--- Exposed on RopeManager so a game script can animate it over time.
+-- Wind acceleration added to each frame.
 local WindAcceleration = Vector3.new(0, 0, 0)
 
--- Visual cylinder dimensions.  Radius matches PARTICLE_RADIUS.
 local SEGMENT_RADIUS = PARTICLE_RADIUS
--- Height is overridden each frame to match actual inter-particle distance.
 local SEGMENT_BASE_HEIGHT = 0.5
 
--- Maximum simultaneous ropes before the oldest is auto-removed.
+-- Max ropes amount, if exceeds then the oldest rope get removed.
 local MAX_ROPES = 40
 
--- ═══════════════════════════════════════════════════════════════════════════
--- 2. PART POOL  —  recycle cylinder Parts to avoid per-frame Instance.new
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- Part Pool: recycle cylinder Parts to avoid per-frame Instance.new
+-- =================================================================
 
 local PartPool = {}
 PartPool.__index = PartPool
 
---[[
-    PartPool.new(template, size)
-    ────────────────────────────
-    Pre-creates `size` clones of `template` and parks them off-world.
-    Template should be an anchored, non-colliding cylinder Part.
---]]
 function PartPool.new(template: BasePart, size: number)
 	local self   = setmetatable({}, PartPool)
 	self._free   = {}      -- idle parts ready for reuse
@@ -143,18 +92,10 @@ segTemplate.Transparency = 1
 -- 96 pre-warmed segments supports about 3–4 simultaneous 25-link ropes.
 local SegmentPool = PartPool.new(segTemplate, 96)
 
--- ═══════════════════════════════════════════════════════════════════════════
--- 3. PARTICLE  —  a single verlet point-mass
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- Particle: a single verlet point-mass
+-- =================================================================
 
---[[
-    A Particle stores:
-        pos      — current world position
-        prevPos  — position last frame  (velocity = pos - prevPos implicitly)
-        pinned   — if true, this particle is immovable (anchored to a CFrame)
-        anchor   — optional function() → CFrame  called each frame when pinned
-                   (lets a pin track a moving Part, e.g. a swinging NPC hand)
---]]
 local Particle = {}
 Particle.__index = Particle
 
@@ -167,16 +108,6 @@ function Particle.new(position: Vector3, pinned: boolean, anchorFn)
 	}, Particle)
 end
 
---[[
-    Particle:Integrate(dt)
-    ───────────────────────
-    Advances the particle using the Verlet formula:
-        newPos = pos + (pos - prevPos)*DAMPING + accel * dt²
-
-    Pinned particles skip integration and are instead moved to their anchor.
-    This is the key insight: constraints can forcibly set positions without
-    blowing up the simulation, because velocity is derived, not stored.
---]]
 function Particle:Integrate(dt: number)
 	if self.pinned then
 		-- If the pin has a dynamic anchor (e.g. a moving attachment),
@@ -194,16 +125,13 @@ function Particle:Integrate(dt: number)
 	local accel  = (GRAVITY + WindAcceleration) * dt * dt
 	local newPos = self.pos + vel + accel
 
-	-- ── Collision response ───────────────────────────────────────────────
-	-- SphereCast from prevPos toward newPos catches geometry between frames.
+	-- Collision Response
 	local rayDir = newPos - self.pos
 	local rayLen = rayDir.Magnitude
 	if rayLen > 0.001 then
 		local hit = workspace:Spherecast(self.pos, PARTICLE_RADIUS, rayDir)
 		if hit then
 			-- Project the particle onto the hit surface, offset by radius.
-			-- Reflect the implicit velocity across the surface normal for a
-			-- small bounce (coefficient 0.15 — almost fully inelastic).
 			local normal     = hit.Normal
 			local reflection = vel - normal * (2 * vel:Dot(normal)) * 0.15
 			local safePos    = hit.Position + normal * PARTICLE_RADIUS
@@ -217,29 +145,13 @@ function Particle:Integrate(dt: number)
 	self.pos     = newPos
 end
 
--- ═══════════════════════════════════════════════════════════════════════════
--- 4. ROPE  —  a chain of Particles connected by length constraints
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- ROPE - a chain of Particles connected by length constraints
+-- =================================================================
 
 local Rope = {}
 Rope.__index = Rope
 
---[[
-    Rope.new(config)
-    ────────────────
-    config fields:
-        startPos   Vector3         — world position of first particle
-        endPos     Vector3         — world position of last particle
-        segments   number          — link count (more = more detailed sag)
-        startAnchor function?      — optional () → CFrame  for the start pin
-        endAnchor   function?      — optional () → CFrame  for the end pin
-        color      Color3?         — visual colour override
-        sag        number?         — slack factor (1 = taut, >1 = saggy)
-
-    The rest length of each segment is:
-        (startPos - endPos).Magnitude * sag / segments
-    so sag > 1 adds extra rope length, letting gravity pull it into a catenary.
---]]
 function Rope.new(config)
 	local self = setmetatable({}, Rope)
 
@@ -248,9 +160,7 @@ function Rope.new(config)
 	local finish  = config.endPos
 	local sag     = config.sag or 1.2     -- 20% extra length by default
 
-	-- ── Build particle chain ─────────────────────────────────────────────
-	-- Particles are spaced linearly from start to finish at construction.
-	-- Gravity will immediately begin pulling the chain into a catenary shape.
+	-- Build particle chain
 	self._particles = {}
 	for i = 0, N do
 		local t    = i / N
@@ -276,7 +186,7 @@ function Rope.new(config)
 	self._alive      = true
 	self._id         = tostring(self):sub(8)   -- unique handle for debugging
 
-	-- ── Acquire visual segments from pool ────────────────────────────────
+	-- Acquire visual segment from pool.
 	-- We need N cylinders for N inter-particle gaps.
 	self._visuals = {}
 	for i = 1, N do
@@ -288,20 +198,6 @@ function Rope.new(config)
 	return self
 end
 
---[[
-    Rope:_solveConstraints()
-    ─────────────────────────
-    The heart of Verlet rope physics.
-
-    For each adjacent pair (A, B):
-        1. Measure the current distance |AB|.
-        2. Compute the error:  delta = current - restLength.
-        3. Push A and B apart (or together) by delta/2 each along AB.
-
-    Pinned particles absorb none of the correction — only free ones move.
-    Iterating this SOLVER_ITERATIONS times converges the chain toward a
-    physically plausible shape without needing to solve a linear system.
---]]
 function Rope:_solveConstraints()
 	local pts = self._particles
 	local rest = self._restLength
@@ -320,26 +216,12 @@ function Rope:_solveConstraints()
 			local correction = ab * error
 
 			-- Free particles absorb half the correction each.
-			-- Pinned particles absorb nothing — the rope stretches away from
-			-- the anchor rather than moving it.
 			if not a.pinned then a.pos += correction end
 			if not b.pinned then b.pos -= correction end
 		end
 	end
 end
 
---[[
-    Rope:_updateVisuals()
-    ──────────────────────
-    Positions each cylinder segment between its two bounding particles.
-
-    A cylinder's default orientation has its length along the X axis.
-    CFrame.lookAt points +Z toward target, so we compose a rotation that
-    aligns the cylinder's long axis with the inter-particle vector.
-
-    The cylinder is scaled on its X axis to match the live inter-particle
-    distance, so the rope "stretches" slightly instead of showing gaps.
---]]
 function Rope:_updateVisuals()
 	local pts = self._particles
 
@@ -378,14 +260,6 @@ function Rope:_updateVisuals()
 	end
 end
 
---[[
-    Rope:Step(dt)
-    ──────────────
-    Full simulation step for this rope:
-        1. Integrate every particle (verlet + collision).
-        2. Solve distance constraints SOLVER_ITERATIONS times.
-        3. Refresh cylinder CFrames/sizes to match new particle positions.
---]]
 function Rope:Step(dt: number)
 	if not self._alive then return end
 
@@ -397,13 +271,6 @@ function Rope:Step(dt: number)
 	self:_updateVisuals()
 end
 
---[[
-    Rope:Pin(index, anchorFn)
-    ──────────────────────────
-    Dynamically pin or re-pin a particle at `index` (1 = start, #pts = end).
-    `anchorFn` is an optional function() → CFrame; passing nil pins in place.
-    Passing pinned = false un-pins (releases) the particle.
---]]
 function Rope:Pin(index: number, anchorFn, pinned: boolean)
 	local p = self._particles[index]
 	if not p then return end
@@ -411,27 +278,10 @@ function Rope:Pin(index: number, anchorFn, pinned: boolean)
 	p.anchor = anchorFn
 end
 
---[[
-    Rope:Cut(index) → Rope, Rope
-    ─────────────────────────────
-    Splits the rope at link `index`, returning two new independent Rope objects.
-
-    Implementation:
-        • The left half keeps particles [1 .. index], inheriting the original
-          start pin.  Its last particle becomes free.
-        • The right half keeps particles [index+1 .. N+1], inheriting the
-          original end pin.  Its first particle becomes free.
-        • Visuals and particles are redistributed; the original rope is
-          destroyed.
-
-    This is mechanically impossible with RopeConstraint — a genuine capability
-    unique to a custom simulation.
---]]
 function Rope:Cut(index: number)
 	if not self._alive then return nil, nil end
 	if index < 1 or index >= #self._particles then return nil, nil end
 
-	-- ── Build LEFT rope ─────────────────────────────────────────────────
 	local leftRope       = setmetatable({}, Rope)
 	leftRope._particles  = {}
 	leftRope._visuals    = {}
@@ -451,7 +301,6 @@ function Rope:Cut(index: number)
 	end
 	leftRope._segCount = index - 1
 
-	-- ── Build RIGHT rope ─────────────────────────────────────────────────
 	local rightRope       = setmetatable({}, Rope)
 	rightRope._particles  = {}
 	rightRope._visuals    = {}
@@ -480,12 +329,6 @@ function Rope:Cut(index: number)
 	return leftRope, rightRope
 end
 
---[[
-    Rope:Destroy()
-    ───────────────
-    Cleanly removes the rope: releases all visual parts back to the pool
-    and marks the rope dead so the manager stops stepping it.
---]]
 function Rope:Destroy()
 	if not self._alive then return end
 	self._alive = false
@@ -497,15 +340,10 @@ function Rope:Destroy()
 	self._particles = {}
 end
 
--- ═══════════════════════════════════════════════════════════════════════════
--- 5. ROPE MANAGER  —  global registry and Heartbeat driver
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- ROPE MANGER: Global registry and Heartbeat driver
+-- =================================================================
 
---[[
-    RopeManager holds all live Rope objects and drives the simulation from a
-    single RunService.Heartbeat connection.  One connection for N ropes is far
-    cheaper than N individual connections (each connection has overhead).
---]]
 local RopeManager = {}
 RopeManager._ropes = {}   -- list of active Rope instances
 
@@ -556,20 +394,12 @@ RunService.Heartbeat:Connect(function(dt: number)
 	end
 end)
 
--- ═══════════════════════════════════════════════════════════════════════════
--- 6. PUBLIC API
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- PUBLIC API
+-- =================================================================
 
 local VerletRope = {}
 
---[[
-    VerletRope.Create(config) → Rope
-    ─────────────────────────────────
-    The primary entry point.  Creates a rope and registers it with the manager.
-
-    config:  see Rope.new() documentation above.
-    Returns: the Rope instance (hold onto it to Pin, Cut, or Destroy later).
---]]
 function VerletRope.Create(config): typeof(Rope)
 	local rope = Rope.new(config)
 	RopeManager:Add(rope)
@@ -579,21 +409,13 @@ end
 -- Expose the manager so game scripts can set Wind or query Count.
 VerletRope.Manager = RopeManager
 
--- ═══════════════════════════════════════════════════════════════════════════
--- DEMO  —  three ropes with different configs to prove all features work
--- ═══════════════════════════════════════════════════════════════════════════
+-- =================================================================
+-- DEMO: three ropes with different configs to prove all features work
+-- =================================================================
 --[[
-    This demo block creates three ropes the moment the script runs:
-
-        Rope A  — a standard catenary between two fixed anchors, 20 segments.
-        Rope B  — a long loose rope pinned only at the top, 28 segments,
-                  to demonstrate free-hanging physics.
-        Rope C  — a rope that gets cut at link 10 after 4 seconds, showing
-                  the unique cut mechanic.
-
-    Wind slowly oscillates so the ropes sway.
-
-    Remove or guard with an `if IS_DEMO then` flag before shipping.
+    Rope A: a standard catenary between two fixed anchors, 20 segments.
+    Rope B: a long loose rope pinned only at the top, 28 segments, to demonstrate free-hanging physics.
+    Rope C: a rope that gets cut at link 10 after 4 seconds, showing the unique cut mechanic.
 --]]
 
 -- Animate wind with a sine wave so ropes sway naturally over time.
@@ -618,7 +440,6 @@ workspace.Part.Touched:Connect(function()
 	if os.clock() - lastTouched < 0.5 then return end
 	lastTouched = os.clock()
 	
-	-- ── Rope A: catenary between two fixed pillars ───────────────────────────
 	local ropeA = VerletRope.Create({
 		startPos    = Vector3.new(-10, 20, 0),
 		endPos      = Vector3.new( 10, 20, 0),
@@ -627,7 +448,6 @@ workspace.Part.Touched:Connect(function()
 		color       = Color3.fromRGB(180, 130, 80),
 	})
 
-	-- ── Rope B: long free-hanging rope (only top pinned) ────────────────────
 	local ropeB = VerletRope.Create({
 		startPos = Vector3.new(0, 30, 5),
 		endPos   = Vector3.new(0,  8, 5),
@@ -638,7 +458,6 @@ workspace.Part.Touched:Connect(function()
 	-- Un-pin the bottom end so it swings freely.
 	ropeB:Pin(29, nil, false)
 
-	-- ── Rope C: rope that gets cut mid-simulation after 4 seconds ───────────
 	local ropeC = VerletRope.Create({
 		startPos = Vector3.new(-5, 25, -8),
 		endPos   = Vector3.new( 5, 25, -8),
@@ -658,5 +477,4 @@ workspace.Part.Touched:Connect(function()
 	end)
 end)
 
--- ─────────────────────────────────────────────────────────────────────────
 return VerletRope
