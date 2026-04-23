@@ -37,6 +37,8 @@
     After integrating, we run SOLVER_ITERATIONS passes of constraint
     relaxation.  Each pass pushes every pair of adjacent particles back to
     their rest length.  More iterations = stiffer rope, fewer = rubbery.
+
+	** You guys asked for detailed comments btw
 --]]
 
 -- ═══════════════════════════════════════════════════════════════════════════
