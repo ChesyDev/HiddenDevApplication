@@ -38,7 +38,7 @@
     relaxation.  Each pass pushes every pair of adjacent particles back to
     their rest length.  More iterations = stiffer rope, fewer = rubbery.
 
-	** You guys asked for detailed comments btw
+	** You guys asked for detailed comments btw, feels like submitting an assignment ngl
 --]]
 
 -- ═══════════════════════════════════════════════════════════════════════════
