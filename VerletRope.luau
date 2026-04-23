@@ -1,6 +1,7 @@
 --[[
 VertelRope.luau:
 A fully server-side rope and chain simulation engine built on Verlet Integration.
+Rewritten comments manually 🥀
 --]]
 
 -- =================================================================
