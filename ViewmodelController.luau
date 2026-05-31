@@ -1,8 +1,8 @@
 --[[
 Viewmodel Controller v1.0.0
 
-I'm just focusing on the first person animations for now
-So there isn't anything special yet just super basic stuff for application.
+I'm just focusing on the visuals for now
+So there isn't anything special yet, super basic stuff for application.
 Currently focusing on Spring, Recoil, Sway, Bobbing, Animations.
 
 Press '1' to equip a gun
