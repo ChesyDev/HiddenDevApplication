@@ -120,7 +120,7 @@ function Viewmodel.new()
 			self._bobClock = 0
 		end
 
-		-- Tilt: roll based on strafe
+		-- Tilt
 		self.tiltSpring:Impulse(Vector3.new(0, 0, localMove.X * TILT_AMOUNT * dt * 60))
 
 		local swayPos = self.swaySpring.Position
