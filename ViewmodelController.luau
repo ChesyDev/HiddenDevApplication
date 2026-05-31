@@ -6,6 +6,7 @@ So there isn't anything special yet, super basic stuff for application.
 Currently focusing on Spring, Recoil, Sway, Bobbing, Animations.
 
 Press '1' to equip a gun
+LMB anim only for now
 
 ]]
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
