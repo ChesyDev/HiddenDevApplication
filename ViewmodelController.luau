@@ -3,6 +3,7 @@ Viewmodel Controller v1.0.0
 
 I'm just focusing on the first person animations for now
 So there isn't anything special yet just super basic stuff for application.
+Currently focusing on Spring, Recoil, Sway, Bobbing, Animations.
 
 Press '1' to equip a gun
 
@@ -142,6 +143,14 @@ function Viewmodel.new()
 	end
 
 	self._connections.update = RunService.RenderStepped:Connect(onRenderStepped)
+	
+	self._connections.cameraMode = RunService.RenderStepped:Connect(function()
+		local camera = workspace.CurrentCamera
+		local isFirstPerson = camera.CameraType == Enum.CameraType.Custom
+			and (player.Character and player.Character:FindFirstChildOfClass("Humanoid"))
+			and (camera.CFrame.Position - player.Character.Head.CFrame.Position).Magnitude < 2
+		self:SetVisible(isFirstPerson == true)
+	end)
 
 	self._connections.equip = Remotes.EquipWeapon.OnClientEvent:Connect(function(weaponName)
 		self:SwitchWeapon(weaponName)
