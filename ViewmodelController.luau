@@ -1,4 +1,5 @@
 --[[
+Connected Discord-GitHub, Discord: chesy_, Roblox: Chesy_Dev
 Viewmodel Controller v1.0.0
 
 I'm just focusing on the visuals for now
